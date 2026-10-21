@@ -88,10 +88,10 @@ desktop_assistant/
     ├── search.py                  # 目录树直搜（索引未就绪时降级用）
     ├── widgets/
     │   ├── base_widget.py         # 小组件基类（置顶/半透明/可拖动）
-    │   ├── clock_widget.py        # 时钟（农历 · 大字体）
+    │   ├── clock_widget.py         # 时钟（农历 · 大字体）
     │   ├── weather_widget.py      # 天气
     │   ├── monitor_widget.py      # 系统监控
-    │   ├── floating_ball.py       # 悬浮球
+    │   ├── floating_ball.py        # 悬浮球
     │   ├── shelf_widget.py        # 收纳盒（拖入文件自动归类）
     │   └── todo_widget.py         # 事项清单（待办持久化）
     └── ui/
