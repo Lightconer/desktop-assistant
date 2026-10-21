@@ -48,6 +48,7 @@ def main() -> int:
             wg = cfg.get("widgets")
             city = weather_city or cfg.get("weather_city", "石家庄")
 
+            # 时钟（农历 + 大字体）
             if wg.get("clock", True):
                 if self.clock is None:
                     self.clock = ClockWidget(
@@ -59,6 +60,7 @@ def main() -> int:
                 if self.clock:
                     self.clock.close(); self.clock = None
 
+            # 天气（城市变化时重建）
             if wg.get("weather", True):
                 if self.weather is None or (weather_city and self.weather.city != city):
                     if self.weather:
@@ -70,6 +72,7 @@ def main() -> int:
                 if self.weather:
                     self.weather.close(); self.weather = None
 
+            # 监控
             if wg.get("monitor", True):
                 if self.monitor is None:
                     self.monitor = MonitorWidget()
@@ -79,6 +82,7 @@ def main() -> int:
                 if self.monitor:
                     self.monitor.close(); self.monitor = None
 
+            # 悬浮球
             if wg.get("ball", True):
                 if self.ball is None:
                     self.ball = FloatingBall(menu_builder=lambda: build_ball_menu())
@@ -87,6 +91,7 @@ def main() -> int:
                 if self.ball:
                     self.ball.close(); self.ball = None
 
+            # 收纳盒
             if wg.get("shelf", True):
                 if self.shelf is None:
                     self.shelf = ShelfWidget(win.desktop_dir, win.rules, log_cb=win._append_log)
@@ -97,6 +102,7 @@ def main() -> int:
                 if self.shelf:
                     self.shelf.close(); self.shelf = None
 
+            # 事项清单
             if wg.get("todo", True):
                 if self.todo is None:
                     self.todo = TodoWidget()
@@ -107,6 +113,7 @@ def main() -> int:
                     self.todo.close(); self.todo = None
 
         def _recreate(self) -> None:
+            # 通过同步逻辑让已关闭的组件自动重建或保持关闭
             self.sync()
 
     def build_ball_menu() -> QMenu:
@@ -136,8 +143,10 @@ def main() -> int:
 
     mgr = WidgetManager()
     mgr.sync()
+    # 设置页改动（含天气城市）后同步小组件
     win.widgetPrefsChanged.connect(lambda: mgr.sync(weather_city=cfg.get("weather_city", "石家庄")))
 
+    # ---------------- 系统托盘 ----------------
     tray = QSystemTrayIcon(app)
     tray.setToolTip("桌面助手")
     tray.setIcon(app.style().standardIcon(app.style().StandardPixmap.SP_ComputerIcon))
