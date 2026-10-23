@@ -189,6 +189,20 @@ class MainWindow(QMainWindow):
         self.scan_organize()
         self._init_fast_search()
 
+    _TAB_INDEX = {"organize": 0, "accelerate": 1, "recycle": 2, "apps": 3,
+                  "search": 4, "wallpaper": 5, "shutdown": 6, "settings": 7}
+
+    def focus_tab(self, key: str) -> None:
+        """唤起主窗口并定位到指定功能页签（供侧边面板等调用）。"""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        idx = self._TAB_INDEX.get(key)
+        if idx is not None:
+            self._tabs.setCurrentIndex(idx)
+            if key == "search":
+                self.search_input.setFocus()
+
     def closeEvent(self, event) -> None:
         for th in (getattr(self, "_idx_thread", None), getattr(self, "_search_thread", None),
                    self._accel_thread, self._apps_thread, self._everything_search_thread):
@@ -684,14 +698,16 @@ class MainWindow(QMainWindow):
         w = QWidget()
         root = QVBoxLayout(w)
         root.addWidget(QLabel("桌面小组件："))
+        self.wg_panel_cb = QCheckBox("侧边面板（360 风格统一入口）")
         self.wg_ball_cb = QCheckBox("悬浮球（CPU 占用）")
         self.wg_clock_cb = QCheckBox("时钟（农历 · 可大字体）")
         self.wg_weather_cb = QCheckBox("天气")
         self.wg_monitor_cb = QCheckBox("系统监控")
         self.wg_shelf_cb = QCheckBox("收纳盒（拖入文件自动归类）")
         self.wg_todo_cb = QCheckBox("事项清单（待办事项）")
-        for cb in (self.wg_ball_cb, self.wg_clock_cb, self.wg_weather_cb,
-                   self.wg_monitor_cb, self.wg_shelf_cb, self.wg_todo_cb):
+        for cb in (self.wg_panel_cb, self.wg_ball_cb, self.wg_clock_cb,
+                   self.wg_weather_cb, self.wg_monitor_cb, self.wg_shelf_cb,
+                   self.wg_todo_cb):
             root.addWidget(cb)
 
         row = QHBoxLayout()
@@ -712,6 +728,7 @@ class MainWindow(QMainWindow):
 
     def _load_settings(self) -> None:
         wg = self.cfg.get("widgets")
+        self.wg_panel_cb.setChecked(wg.get("panel", True))
         self.wg_ball_cb.setChecked(wg.get("ball", True))
         self.wg_clock_cb.setChecked(wg.get("clock", True))
         self.wg_weather_cb.setChecked(wg.get("weather", True))
@@ -724,9 +741,10 @@ class MainWindow(QMainWindow):
         self.dry_cb.setChecked(bool(self.cfg.get("dry_run", True)))
 
     def _save_settings(self) -> None:
-        for key, cb in (("ball", self.wg_ball_cb), ("clock", self.wg_clock_cb),
-                        ("weather", self.wg_weather_cb), ("monitor", self.wg_monitor_cb),
-                        ("shelf", self.wg_shelf_cb), ("todo", self.wg_todo_cb)):
+        for key, cb in (("panel", self.wg_panel_cb), ("ball", self.wg_ball_cb),
+                        ("clock", self.wg_clock_cb), ("weather", self.wg_weather_cb),
+                        ("monitor", self.wg_monitor_cb), ("shelf", self.wg_shelf_cb),
+                        ("todo", self.wg_todo_cb)):
             self.cfg.set_nested("widgets", key, cb.isChecked())
         self.cfg.set("weather_city", self.city_input.text().strip() or "石家庄")
         self.cfg.set("auto_start", self.auto_start_cb.isChecked())

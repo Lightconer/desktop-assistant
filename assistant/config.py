@@ -14,12 +14,13 @@ DEFAULTS: Dict[str, Any] = {
     "auto_watch": False,         # 桌面监听自动整理
     "dry_run": True,             # 整理预览模式
     "widgets": {                 # 小组件开关
-        "ball": True,            # 悬浮球
-        "clock": True,           # 时钟
-        "weather": True,         # 天气
-        "monitor": True,         # 系统监控
-        "shelf": True,           # 收纳盒
-        "todo": True,            # 事项清单
+        "panel": True,           # 360 风格侧边面板（统一入口）
+        "ball": False,           # 悬浮球
+        "clock": False,          # 时钟
+        "weather": False,        # 天气
+        "monitor": False,        # 系统监控
+        "shelf": False,          # 收纳盒
+        "todo": False,           # 事项清单
     },
     "clock_big": False,          # 时钟大字体
     "weather_city": "石家庄",
@@ -62,7 +63,16 @@ class AppConfig:
             self.save()
             return
         if isinstance(loaded, dict):
+            stored_widgets = loaded.get("widgets")
             self.data = _deep_merge(copy.deepcopy(DEFAULTS), loaded)
+            # 旧版配置迁移：没有 panel 键说明是升级用户 → 默认启用侧边面板、收起零散小组件
+            if isinstance(stored_widgets, dict) and "panel" not in stored_widgets:
+                w = self.data.get("widgets") or {}
+                w["panel"] = True
+                for k in ("ball", "clock", "weather", "monitor", "shelf", "todo"):
+                    w[k] = False
+                self.data["widgets"] = w
+                self.save()
 
     def save(self) -> None:
         tmp_fd, tmp = tempfile.mkstemp(dir=os.path.dirname(self.path), suffix=".tmp")

@@ -19,6 +19,7 @@ def main() -> int:
 
     from assistant.config import AppConfig
     from assistant.ui.main_window import MainWindow
+    from assistant.widgets.side_panel import SidePanel
     from assistant.widgets.clock_widget import ClockWidget
     from assistant.widgets.weather_widget import WeatherWidget
     from assistant.widgets.monitor_widget import MonitorWidget
@@ -37,6 +38,7 @@ def main() -> int:
     # ---------------- 小组件管理 ----------------
     class WidgetManager:
         def __init__(self):
+            self.panel = None
             self.clock = None
             self.weather = None
             self.monitor = None
@@ -52,6 +54,20 @@ def main() -> int:
                 """小组件点关闭 → 持久化关闭该组件并同步。"""
                 return lambda _k: (cfg.set_nested("widgets", key, False),
                                    self.sync())
+
+            # 侧边面板（360 风格统一入口）
+            if wg.get("panel", True):
+                if self.panel is None:
+                    self.panel = SidePanel(win.desktop_dir, win.rules)
+                    self.panel.toolRequested.connect(win.focus_tab)
+                    self.panel.organizeRequested.connect(self._run_organize)
+                    self.panel.closeRequested.connect(close_persist("panel"))
+                    self.panel.message.connect(win._append_log)
+                    self.panel.show()
+                    self.panel.dock_right()
+            else:
+                if self.panel:
+                    self.panel.close(); self.panel = None
 
             # 时钟（农历 + 大字体）
             if wg.get("clock", True):
@@ -121,6 +137,13 @@ def main() -> int:
             # 通过同步逻辑让已关闭的组件自动重建或保持关闭
             self.sync()
 
+        def _run_organize(self) -> None:
+            """侧边面板「桌面整理」：唤起主窗口执行整理，完成后刷新速览。"""
+            win.showNormal(); win.raise_(); win.activateWindow()
+            win._organize()
+            if self.panel:
+                self.panel.refresh_files()
+
     def build_ball_menu() -> QMenu:
         menu = QMenu()
         for text, fn in (
@@ -134,7 +157,8 @@ def main() -> int:
             menu.addAction(act)
         menu.addSeparator()
         wg = cfg.get("widgets")
-        for key, label in (("clock", "时钟"), ("weather", "天气"), ("monitor", "系统监控")):
+        for key, label in (("panel", "侧边面板"), ("clock", "时钟"),
+                           ("weather", "天气"), ("monitor", "系统监控")):
             act = QAction(label, menu)
             act.setCheckable(True)
             act.setChecked(wg.get(key, True))
