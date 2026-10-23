@@ -122,8 +122,13 @@ class TodoWidget(BaseWidget):
             self.items = []
 
     def save(self) -> None:
+        # 原子写入：先写临时文件再替换，异常断电不损坏现有待办
         try:
-            with open(self.todo_path, "w", encoding="utf-8") as f:
+            import tempfile
+            tmp_fd, tmp = tempfile.mkstemp(
+                dir=os.path.dirname(self.todo_path) or ".", suffix=".tmp")
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                 json.dump(self.items, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.todo_path)
         except OSError:
             pass

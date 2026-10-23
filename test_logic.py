@@ -68,10 +68,13 @@ def main():
     check(cnt == 2, f"清理到 2 个临时文件(实得 {cnt})")
     check(freed > 0, f"释放量>0 ({freed:.2f} MB)")
 
-    print("== 5. 回收站信息（非 Windows 返回 0） ==")
+    print("== 5. 回收站信息 ==")
     from assistant.recycle import recycle_info, human_bytes
     info = recycle_info()
-    check(info["item_count"] == 0 and info["bytes"] == 0, "非 Windows 回收站返回 0")
+    if sys.platform == "win32":
+        check(info["item_count"] >= 0 and info["bytes"] >= 0, "Windows 回收站信息读取不抛异常")
+    else:
+        check(info["item_count"] == 0 and info["bytes"] == 0, "非 Windows 回收站返回 0")
     check(human_bytes(1536) == "1.5 KB", "human_bytes 换算正确")
 
     print("== 6. 全局搜索 ==")
@@ -87,11 +90,16 @@ def main():
     res2 = search_files("", [make])
     check(res2 == [], "空关键字返回空")
 
-    print("== 7. 软件管理（非 Windows 返回空/跳过） ==")
+    print("== 7. 软件管理 ==")
     from assistant.apps import list_installed_apps, set_auto_start
-    check(list_installed_apps() == [], "非 Windows 无软件列表")
-    set_auto_start(True)
-    check(True, "set_auto_start 非 Windows 不抛异常")
+    if sys.platform == "win32":
+        apps = list_installed_apps()
+        check(isinstance(apps, list) and len(apps) > 0, f"Windows 枚举到 {len(apps)} 个已安装软件")
+    else:
+        check(list_installed_apps() == [], "非 Windows 无软件列表")
+        set_auto_start(True)
+        check(True, "set_auto_start 非 Windows 不抛异常")
+    # Windows 上不真实写注册表自启（避免污染用户启动项）
 
     print("== 8. 天气（离线/失败降级） ==")
     from assistant.weather import get_weather
@@ -162,9 +170,12 @@ def main():
     wm = WallpaperManager(wpdir)
     imgs = wm.list_images()
     check(len(imgs) == 3, f"壁纸扫描 3 张(实得 {len(imgs)})")
-    ok = wm.apply(imgs[0])
-    check(ok is False and wm._current == imgs[0], "非 Windows 仅记录不设置(apply 返回 False)")
-    nxt = wm.next()
+    # 打桩 _set_wallpaper_win：不真实修改用户桌面壁纸，行为可断言
+    from unittest.mock import patch as _patch
+    with _patch("assistant.wallpaper._set_wallpaper_win", return_value=False):
+        ok = wm.apply(imgs[0])
+        check(ok is False and wm._current == imgs[0], "打桩后 apply 返回 False 且记录当前壁纸")
+        nxt = wm.next()
     check(nxt in imgs and nxt != imgs[0], "轮播切换到下一张")
     wm.start_rotation(5.0)
     check(wm.rotating, "轮播线程已启动")
@@ -178,7 +189,11 @@ def main():
     check(build_command("restart", 30) == ["shutdown", "/r", "/t", "30"], "重启命令构造正确")
     check(build_command("logout", 99) == ["shutdown", "/l"], "注销命令立即执行")
     check(build_command("sleep", 10) is None, "睡眠走 API 不走 shutdown")
-    check(sd_cancel() is False and sd_execute("shutdown", 60) is False, "非 Windows 取消/执行返回 False")
+    # 关键：打桩 supported()=False，避免在真实 Windows 上排定一次真正的系统关机！
+    from unittest.mock import patch as _patch14
+    with _patch14("assistant.shutdown_timer.supported", return_value=False):
+        check(sd_cancel() is False and sd_execute("shutdown", 60) is False,
+              "打桩后取消/执行返回 False（不触碰真实系统）")
     cd = Countdown(3)
     check(not cd.tick() and cd.remaining == 2, "倒计时递减")
     check(cd.tick(2) and cd.finished and cd.remaining == 0, "倒计时归零触发")

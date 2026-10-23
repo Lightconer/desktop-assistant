@@ -31,17 +31,65 @@ class CleanResult:
 
 
 def _empty_working_set_windows() -> bool:
-    """Windows 下调用 SetProcessWorkingSetSize(-1,-1) 尽量让系统回收当前进程内存。"""
+    """遍历全部进程调用 EmptyWorkingSet，让系统回收各进程可释放的内存页。
+
+    需要管理员权限才能处理系统进程；无权限的进程自动跳过。
+    只要有任一进程处理成功即返回 True。
+    """
     if sys.platform != "win32":
         return False
     try:
         import ctypes
+        PROCESS_SET_QUOTA = 0x0100
+        PROCESS_QUERY_INFORMATION = 0x0400
+        INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        handle = kernel32.GetCurrentProcess()
-        ok = kernel32.SetProcessWorkingSetSize(handle, ctypes.c_size_t(-1), ctypes.c_size_t(-1))
-        return bool(ok)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        EmptyWorkingSet = psapi.EmptyWorkingSet
+        EmptyWorkingSet.argtypes = [ctypes.c_void_p]
+        OpenProcess = kernel32.OpenProcess
+        OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        OpenProcess.restype = ctypes.c_void_p
+        CloseHandle = kernel32.CloseHandle
+        CloseHandle.argtypes = [ctypes.c_void_p]
+
+        pids = _enum_process_ids(psapi)
+        ok_count = 0
+        for pid in pids:
+            handle = OpenProcess(PROCESS_SET_QUOTA | PROCESS_QUERY_INFORMATION, False, pid)
+            if not handle or handle == INVALID_HANDLE_VALUE:
+                continue
+            try:
+                if EmptyWorkingSet(handle):
+                    ok_count += 1
+            finally:
+                CloseHandle(handle)
+        return ok_count > 0
     except Exception:
-        return False
+        # 兜底：至少清理当前进程
+        try:
+            import ctypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.GetCurrentProcess()
+            return bool(kernel32.SetProcessWorkingSetSize(
+                handle, ctypes.c_size_t(-1), ctypes.c_size_t(-1)))
+        except Exception:
+            return False
+
+
+def _enum_process_ids(psapi) -> List[int]:
+    """用 EnumProcesses 枚举当前可见的全部 PID（不依赖 psutil）。"""
+    import ctypes
+    size = 4096
+    while True:
+        buf = (ctypes.c_uint32 * size)()
+        cb = ctypes.c_uint32()
+        if not psapi.EnumProcesses(ctypes.byref(buf), ctypes.sizeof(buf), ctypes.byref(cb)):
+            return []
+        n = cb.value // ctypes.sizeof(ctypes.c_uint32)
+        if n < size:
+            return [buf[i] for i in range(n) if buf[i]]
+        size *= 2
 
 
 def _temp_dirs() -> List[str]:

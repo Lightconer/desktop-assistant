@@ -48,13 +48,18 @@ def main() -> int:
             wg = cfg.get("widgets")
             city = weather_city or cfg.get("weather_city", "石家庄")
 
+            def close_persist(key: str):
+                """小组件点关闭 → 持久化关闭该组件并同步。"""
+                return lambda _k: (cfg.set_nested("widgets", key, False),
+                                   self.sync())
+
             # 时钟（农历 + 大字体）
             if wg.get("clock", True):
                 if self.clock is None:
                     self.clock = ClockWidget(
                         big=bool(cfg.get("clock_big", False)),
                         on_big_change=lambda b: cfg.set("clock_big", b))
-                    self.clock.closeRequested.connect(lambda _k: cfg.set_nested("widgets", "clock", False) or self._recreate())
+                    self.clock.closeRequested.connect(close_persist("clock"))
                     self.clock.show()
             else:
                 if self.clock:
@@ -66,7 +71,7 @@ def main() -> int:
                     if self.weather:
                         self.weather.close()
                     self.weather = WeatherWidget(city)
-                    self.weather.closeRequested.connect(lambda _k: cfg.set_nested("widgets", "weather", False) or self._recreate())
+                    self.weather.closeRequested.connect(close_persist("weather"))
                     self.weather.show()
             else:
                 if self.weather:
@@ -76,7 +81,7 @@ def main() -> int:
             if wg.get("monitor", True):
                 if self.monitor is None:
                     self.monitor = MonitorWidget()
-                    self.monitor.closeRequested.connect(lambda _k: cfg.set_nested("widgets", "monitor", False) or self._recreate())
+                    self.monitor.closeRequested.connect(close_persist("monitor"))
                     self.monitor.show()
             else:
                 if self.monitor:
@@ -96,7 +101,7 @@ def main() -> int:
                 if self.shelf is None:
                     self.shelf = ShelfWidget(win.desktop_dir, win.rules, log_cb=win._append_log)
                     self.shelf.message.connect(win._append_log)
-                    self.shelf.closeRequested.connect(lambda _k: cfg.set_nested("widgets", "shelf", False) or self._recreate())
+                    self.shelf.closeRequested.connect(close_persist("shelf"))
                     self.shelf.show()
             else:
                 if self.shelf:
@@ -106,7 +111,7 @@ def main() -> int:
             if wg.get("todo", True):
                 if self.todo is None:
                     self.todo = TodoWidget()
-                    self.todo.closeRequested.connect(lambda _k: cfg.set_nested("widgets", "todo", False) or self._recreate())
+                    self.todo.closeRequested.connect(close_persist("todo"))
                     self.todo.show()
             else:
                 if self.todo:

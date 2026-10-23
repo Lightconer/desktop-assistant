@@ -29,6 +29,20 @@ _SKIP_DIRS = {
 }
 
 
+def _is_link(path: str) -> bool:
+    """目录是否为符号链接或 Windows 目录联接（junction），避免遍历成环。"""
+    try:
+        if os.path.islink(path):
+            return True
+        if sys.platform == "win32":
+            import stat as _stat
+            st = os.lstat(path)
+            return bool(getattr(st, "st_file_attributes", 0) & _stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        return False
+    except OSError:
+        return False
+
+
 def default_roots() -> List[str]:
     """默认索引根：Windows 为所有盘符，其他平台为用户主目录。"""
     if sys.platform == "win32":
@@ -113,10 +127,21 @@ class FastIndex:
                 for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
                     if stop.is_set():
                         return
+                    # 跳过符号链接/目录联接（Windows 常见 "Application Data" 等联接环）
                     dirnames[:] = [d for d in dirnames
-                                   if d.lower() not in _SKIP_DIRS and not d.startswith(".")]
+                                   if d.lower() not in _SKIP_DIRS
+                                   and not d.startswith(".")
+                                   and not _is_link(os.path.join(dirpath, d))]
                     for fn in filenames:
-                        q.put(os.path.join(dirpath, fn))
+                        if stop.is_set():
+                            return
+                        # 带超时入队：取消时消费者已退出，不能永久阻塞在 put 上
+                        while not stop.is_set():
+                            try:
+                                q.put(os.path.join(dirpath, fn), timeout=0.2)
+                                break
+                            except queue.Full:
+                                continue
 
             count = 0
             batch: List[tuple] = []
@@ -141,7 +166,7 @@ class FastIndex:
                         stop.set()
                         break
                     try:
-                        st = os.stat(path)
+                        st = os.stat(path, follow_symlinks=False)
                         size, mtime = st.st_size, st.st_mtime
                     except OSError:
                         continue
@@ -157,6 +182,14 @@ class FastIndex:
             flush()
             if progress:
                 progress(count)
+
+            # 取消：丢弃新建表，保留旧索引不动（与「旧索引保留」提示一致）
+            if cancel and cancel():
+                conn.execute("DROP TABLE IF EXISTS files_new")
+                if self._fts:
+                    conn.execute("DROP TABLE IF EXISTS files_fts_new")
+                conn.commit()
+                return count
 
             if self._fts:
                 conn.execute("INSERT INTO files_fts_new(rowid, name, path) "

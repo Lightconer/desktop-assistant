@@ -41,7 +41,7 @@ def search_files(
             if len(results) >= limit:
                 return
             try:
-                if entry.is_dir():
+                if entry.is_dir(follow_symlinks=False):
                     name = entry.name.lower()
                     if name in SKIP_DIR_NAMES or entry.name.startswith("."):
                         continue

@@ -42,6 +42,7 @@ class ClockWidget(BaseWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(1000)
+        self._lunar_cache: tuple = ("", "")  # (日期键, 农历文本)
         self._tick()
 
     def _apply_style(self) -> None:
@@ -62,12 +63,14 @@ class ClockWidget(BaseWidget):
         now = time.localtime()
         self.time_label.setText(time.strftime("%H:%M:%S", now))
         self.date_label.setText(time.strftime("%Y年%m月%d日 %A", now))
-        lunar = solar_to_lunar(now.tm_year, now.tm_mon, now.tm_mday)
-        if lunar:
-            self.lunar_label.setText(
-                f"{lunar.ganzhi_year}{lunar.zodiac}年 · {lunar.display()}")
-        else:
-            self.lunar_label.setText("")
+        # 农历一天只算一次，避免每秒重复换算
+        date_key = time.strftime("%Y-%m-%d", now)
+        if date_key != self._lunar_cache[0]:
+            lunar = solar_to_lunar(now.tm_year, now.tm_mon, now.tm_mday)
+            text = (f"{lunar.ganzhi_year}{lunar.zodiac}年 · {lunar.display()}"
+                    if lunar else "")
+            self._lunar_cache = (date_key, text)
+        self.lunar_label.setText(self._lunar_cache[1])
 
     def set_big(self, big: bool) -> None:
         if big == self.big:

@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from typing import Optional
 
-from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -122,8 +123,50 @@ class _EverythingCheck(QThread):
         self.result.emit(self.backend.available())
 
 
+class _AccelThread(QThread):
+    """一键加速后台线程，避免清理临时文件时卡死界面。"""
+    progress = Signal(str)
+    done = Signal(object)
+
+    def __init__(self, config: AppConfig):
+        super().__init__()
+        self.config = config
+
+    def run(self):
+        try:
+            result = one_click_clean(self.config,
+                                     on_progress=lambda m: self.progress.emit(m))
+        except Exception as e:
+            result = e
+        self.done.emit(result)
+
+
+class _AppsThread(QThread):
+    """后台枚举已安装软件（注册表读取较慢，避免阻塞界面）。"""
+    done = Signal(list)
+
+    def run(self):
+        try:
+            self.done.emit(list_installed_apps())
+        except Exception:
+            self.done.emit([])
+
+
+class _EverythingSearchThread(QThread):
+    """Everything HTTP 搜索后台线程（接口无响应时不再冻结界面）。"""
+    done = Signal(list)
+
+    def __init__(self, backend: EverythingBackend, keyword: str, limit: int = 200):
+        super().__init__()
+        self.backend, self.keyword, self.limit = backend, keyword, limit
+
+    def run(self):
+        self.done.emit(self.backend.search(self.keyword, self.limit))
+
+
 class MainWindow(QMainWindow):
     widgetPrefsChanged = Signal()
+    wallChanged = Signal(str)   # 壁纸轮播线程 → 主线程安全通知
 
     def __init__(self, config: AppConfig):
         super().__init__()
@@ -133,16 +176,22 @@ class MainWindow(QMainWindow):
         self.organizer = DesktopOrganizer(self.desktop_dir, self.rules)
         self.organizer.set_log_callback(self._append_log)
         self._search_thread = None
+        self._accel_thread = None
+        self._apps_thread = None
+        self._everything_search_thread = None
 
         self.setWindowTitle("桌面助手")
         self.resize(980, 680)
+        self.wallChanged.connect(
+            lambda p: toast_like(self, f"壁纸已自动切换：{os.path.basename(p)}"))
         self._build_ui()
         self._load_settings()
         self.scan_organize()
         self._init_fast_search()
 
     def closeEvent(self, event) -> None:
-        for th in (getattr(self, "_idx_thread", None), getattr(self, "_search_thread", None)):
+        for th in (getattr(self, "_idx_thread", None), getattr(self, "_search_thread", None),
+                   self._accel_thread, self._apps_thread, self._everything_search_thread):
             if th and th.isRunning():
                 if hasattr(th, "cancel"):
                     try:
@@ -259,6 +308,7 @@ class MainWindow(QMainWindow):
         run_btn = QPushButton("一键加速")
         run_btn.setStyleSheet("font-weight:bold;padding:6px 18px;")
         run_btn.clicked.connect(self._accelerate)
+        self._accel_run_btn = run_btn
         root.addWidget(run_btn)
         root.addStretch(1)
         tip = QLabel("说明：内存清理通过 Windows API 让系统回收可释放的内存页，不会凭空增加物理内存；"
@@ -470,7 +520,7 @@ class MainWindow(QMainWindow):
         if on:
             self.wall_mgr.start_rotation(
                 float(self.wall_interval_sp.value()),
-                on_change=lambda p: toast_like(self, f"壁纸已自动切换：{os.path.basename(p)}"))
+                on_change=self.wallChanged.emit)   # 信号发射线程安全，UI 更新在主线程
             self.wall_stat.setText(f"定时轮播已开启，每 {self.wall_interval_sp.value()} 秒切换一张。")
         else:
             self.wall_mgr.stop_rotation()
@@ -489,7 +539,7 @@ class MainWindow(QMainWindow):
         if rotate:
             self.wall_mgr.start_rotation(
                 float(self.wall_interval_sp.value()),
-                on_change=lambda p: toast_like(self, f"壁纸已自动切换：{os.path.basename(p)}"))
+                on_change=self.wallChanged.emit)
 
     def _build_shutdown_tab(self) -> QWidget:
         w = QWidget()
@@ -547,6 +597,8 @@ class MainWindow(QMainWindow):
         root.addStretch(1)
 
         self.sd_countdown: Optional[Countdown] = None
+        self._sd_deadline = 0.0
+        self._sd_action: Optional[str] = None
         self.sd_timer = QTimer(self)
         self.sd_timer.setInterval(1000)
         self.sd_timer.timeout.connect(self._sd_tick)
@@ -580,8 +632,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "定时关机", "时间格式应为 HH:MM（如 22:00）。")
                 return
         self.sd_countdown = Countdown(secs)
+        self._sd_deadline = time.monotonic() + secs
+        self._sd_action = action
         self.sd_timer.start()
-        if shutdown_supported():
+        if action == "sleep":
+            # shutdown.exe 无法排定睡眠：由助手在倒计时结束时执行（需保持助手运行）
+            self._sd_render_stat("已排定「睡眠」，%d 分钟后由助手执行（请保持助手运行）。" % (secs // 60))
+        elif shutdown_supported():
             ok = shutdown_execute(action, secs)
             note = "（系统已排定，助手关闭后仍会执行）" if ok else "（系统排定失败，请重试）"
             self._sd_render_stat("已排定「%s」%s%s" % (
@@ -596,21 +653,27 @@ class MainWindow(QMainWindow):
         if self.sd_countdown is None:
             self.sd_timer.stop()
             return
-        if self.sd_countdown.tick():
+        # 以截止时间计算剩余，避免 QTimer 累积漂移
+        remaining = int(self._sd_deadline - time.monotonic())
+        if remaining <= 0:
             self.sd_timer.stop()
-            action = self.sd_action_cb.currentData()
+            action = self._sd_action
             self.sd_countdown = None
+            if shutdown_supported() and action == "sleep":
+                shutdown_execute("sleep", 0)
             self.sd_stat.setText("倒计时结束，系统将立即执行「%s」。" % SHUTDOWN_ACTIONS[action])
             self.sd_remain.setText("剩余时间：--:--:--")
             return
-        self.sd_remain.setText("剩余时间：" + self.sd_countdown.format_remaining())
+        self.sd_remain.setText("剩余时间："
+                               f"{remaining // 3600:02d}:{remaining % 3600 // 60:02d}:{remaining % 60:02d}")
 
     def _sd_cancel(self) -> None:
         self.sd_timer.stop()
-        self.sd_countdown = None
-        self.sd_remain.setText("剩余时间：--:--:--")
-        if shutdown_supported():
+        if shutdown_supported() and self._sd_action and self._sd_action != "sleep":
             shutdown_cancel()
+        self.sd_countdown = None
+        self._sd_action = None
+        self.sd_remain.setText("剩余时间：--:--:--")
         self.sd_stat.setText("已取消排定任务。")
         toast_like(self, "已取消")
 
@@ -744,12 +807,25 @@ class MainWindow(QMainWindow):
         self.log_view.appendPlainText(msg)
 
     def _accelerate(self) -> None:
+        if self._accel_thread and self._accel_thread.isRunning():
+            toast_like(self, "加速正在进行中，请稍候。")
+            return
         self.cfg.set_nested("accelerate", "clean_temp", self.acc_temp_cb.isChecked())
         self.cfg.set_nested("accelerate", "clean_memory", self.acc_mem_cb.isChecked())
         self.cfg.set_nested("accelerate", "clear_recycle", self.acc_rc_cb.isChecked())
         self.acc_progress.setText("正在加速…")
-        QApplication_process_events()
-        result = one_click_clean(self.cfg, on_progress=lambda m: (self.acc_progress.setText(m), QApplication_process_events()))
+        self._accel_run_btn.setEnabled(False)
+        self._accel_thread = _AccelThread(self.cfg)
+        self._accel_thread.progress.connect(self.acc_progress.setText)
+        self._accel_thread.done.connect(self._on_accel_done)
+        self._accel_thread.finished.connect(self._accel_thread.deleteLater)
+        self._accel_thread.start()
+
+    def _on_accel_done(self, result) -> None:
+        self._accel_run_btn.setEnabled(True)
+        if isinstance(result, Exception):
+            self.acc_progress.setText(f"加速失败：{result}")
+            return
         lines = [
             f"清理临时文件 {result.temp_files} 个，释放约 {result.temp_mb:.1f} MB，跳过 {result.skipped} 个占用文件。",
             "已清空回收站。" if result.recycled else "",
@@ -758,6 +834,7 @@ class MainWindow(QMainWindow):
         if result.errors:
             lines.append("；".join(result.errors))
         self.acc_progress.setText("\n".join(l for l in lines if l))
+        toast_like(self, "一键加速完成")
 
     def _refresh_recycle(self) -> None:
         info = recycle_info()
@@ -776,7 +853,17 @@ class MainWindow(QMainWindow):
         self._refresh_recycle()
 
     def _load_apps(self) -> None:
-        apps = list_installed_apps()
+        if self._apps_thread and self._apps_thread.isRunning():
+            return
+        self.app_table.setRowCount(0)
+        self.app_table.insertRow(0)
+        self.app_table.setItem(0, 0, QTableWidgetItem("正在读取已安装软件列表…"))
+        self._apps_thread = _AppsThread()
+        self._apps_thread.done.connect(self._on_apps_loaded)
+        self._apps_thread.finished.connect(self._apps_thread.deleteLater)
+        self._apps_thread.start()
+
+    def _on_apps_loaded(self, apps: list) -> None:
         self.apps = apps
         self.app_table.setRowCount(0)
         for a in apps:
@@ -821,6 +908,7 @@ class MainWindow(QMainWindow):
         self._idx_thread = None
         self._everything_check = None
         st = self.fast_index.stats()
+        self._index_count = st["count"]
         self._render_idx_stat(st)
         if st["count"] == 0:
             self._append_log("首次使用，正在后台建立全盘文件索引…")
@@ -857,6 +945,8 @@ class MainWindow(QMainWindow):
     def _on_index_done(self, count: int, msg: str) -> None:
         self.idx_progress.setText("")
         self._append_log(msg)
+        if count > 0:
+            self._index_count = self.fast_index.stats()["count"]
         self._render_idx_stat()
         if count > 0:
             self._append_log("现在可以在「全局搜索」页输入关键字秒级搜索。")
@@ -887,10 +977,16 @@ class MainWindow(QMainWindow):
             self.search_progress.setText("输入关键字开始搜索。")
             return
         if self.everything_cb.isChecked() and self._everything_ok:
-            res = self.everything.search(keyword, 200)
-            self._show_results(res, "Everything 实时搜索")
+            if self._everything_search_thread and self._everything_search_thread.isRunning():
+                return
+            self.search_progress.setText("Everything 实时搜索中…")
+            self._everything_search_thread = _EverythingSearchThread(self.everything, keyword)
+            self._everything_search_thread.done.connect(self._on_everything_search_done)
+            self._everything_search_thread.finished.connect(
+                self._everything_search_thread.deleteLater)
+            self._everything_search_thread.start()
             return
-        if self.fast_index.stats()["count"] > 0:
+        if getattr(self, "_index_count", 0) > 0:
             res = self.fast_index.search(keyword, 200)
             self._show_results(res, "内置索引检索")
             return
@@ -903,6 +999,9 @@ class MainWindow(QMainWindow):
         self._search_thread.done.connect(self._on_search_done)
         self._search_thread.finished.connect(self._search_thread.deleteLater)
         self._search_thread.start()
+
+    def _on_everything_search_done(self, results: list) -> None:
+        self._show_results(results, "Everything 实时搜索")
 
     def _show_results(self, results: list, mode: str) -> None:
         self.search_table.setRowCount(0)
@@ -943,8 +1042,3 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
         except Exception:
             pass
-
-
-def QApplication_process_events() -> None:
-    from PySide6.QtWidgets import QApplication
-    QApplication.processEvents()
